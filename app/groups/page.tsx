@@ -3,6 +3,8 @@
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import AddExpenseForm from '@/components/AddExpenseForm';
+import { useAuth } from '@/contexts/AuthContext';
+import { useRouter } from 'next/navigation';
 
 interface Expense {
   amount: number;
@@ -27,16 +29,22 @@ export default function Groups() {
   const [newGroupMembers, setNewGroupMembers] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const { user } = useAuth();
+  const router = useRouter();
 
   useEffect(() => {
-    fetchGroups();
-  }, []);
+    if (!user) {
+      router.push('/login');
+    } else {
+      fetchGroups();
+    }
+  }, [user]);
 
   const fetchGroups = async () => {
     try {
       setLoading(true);
       setError(null);
-      const response = await fetch('/api/groups');
+      const response = await fetch(`/api/groups?username=${user?.username}`);
       if (!response.ok) {
         throw new Error('Failed to fetch groups');
       }
@@ -61,6 +69,7 @@ export default function Groups() {
         body: JSON.stringify({
           name: newGroupName,
           members: newGroupMembers.split(',').map(member => member.trim()),
+          owner: user?.username,
         }),
       });
       

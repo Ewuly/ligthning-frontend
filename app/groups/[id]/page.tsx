@@ -2,8 +2,9 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { useParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
 import AddExpenseForm from '@/components/AddExpenseForm';
+import { useAuth } from '@/contexts/AuthContext';
 
 interface Expense {
   _id: string;
@@ -14,12 +15,28 @@ interface Expense {
   createdAt: string;
 }
 
+interface PaymentRequest {
+  _id: string;
+  from: string;
+  to: string;
+  amount: number;
+  status: 'pending' | 'paid';
+  createdAt: string;
+}
+
 interface Group {
   _id: string;
   name: string;
   members: string[];
   createdAt: string;
   expenses: Expense[];
+  paymentRequests: PaymentRequest[];
+}
+
+interface Balance {
+  user: string;
+  amount: number;
+  pendingRequests: PaymentRequest[];
 }
 
 export default function GroupDetails() {
@@ -28,18 +45,61 @@ export default function GroupDetails() {
   const [showAddExpense, setShowAddExpense] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const { user } = useAuth();
+  const [balances, setBalances] = useState<Balance[]>([]);
+  const router = useRouter();
+  const [requestedPayments, setRequestedPayments] = useState<Set<string>>(new Set());
 
-  useEffect(() => {
-    fetchGroup();
-  }, [params.id]);
+  const calculateBalances = (data: Group) => {
+    const balanceMap: { [key: string]: number } = {};
+    const pendingRequests = data.paymentRequests?.filter(req => req.status === 'pending') || [];
+    
+    // Initialize balances
+    data.members.forEach((member: string) => {
+      balanceMap[member] = 0;
+    });
 
-  const fetchGroup = async () => {
+    // Add null check for expenses
+    if (data.expenses) {
+      data.expenses.forEach((expense: Expense) => {
+        const splitAmount = expense.amount / expense.splitBetween.length;
+        balanceMap[expense.paidBy] += expense.amount;
+        expense.splitBetween.forEach(member => {
+          balanceMap[member] -= splitAmount;
+        });
+      });
+    }
+
+    return Object.entries(balanceMap).map(([user, amount]) => ({
+      user,
+      amount,
+      pendingRequests: pendingRequests.filter(
+        req => (req.from === user || req.to === user)
+      )
+    }));
+  };
+
+  const loadGroupData = async () => {
     try {
       setLoading(true);
       const response = await fetch(`/api/groups/${params.id}`);
       if (!response.ok) throw new Error('Failed to fetch group');
       const data = await response.json();
-      setGroup(data);
+      
+      // Add null check before setting group and calculating balances
+      if (data) {
+        setGroup(data);
+        const calculatedBalances = calculateBalances(data);
+        setBalances(calculatedBalances);
+
+        // Initialize requestedPayments with null check
+        const existingRequests = new Set(
+          data.paymentRequests
+            ?.filter(req => req.status === 'pending' && req.from === user?.username)
+            ?.map(req => req.to) || []
+        );
+        setRequestedPayments(existingRequests);
+      }
     } catch (error) {
       console.error('Error:', error);
       setError('Failed to load group');
@@ -48,14 +108,98 @@ export default function GroupDetails() {
     }
   };
 
+  useEffect(() => {
+    if (!user) {
+      router.push('/login');
+      return;
+    }
+
+    loadGroupData();
+  }, [user, params.id, router]);
+
   const handleExpenseAdded = async () => {
     setShowAddExpense(false);
-    await fetchGroup();
+    await loadGroupData();
+  };
+
+  const handleRequestPayment = async (amount: number, to: string) => {
+    try {
+      setRequestedPayments(prev => new Set([...prev, to]));
+
+      const response = await fetch(`/api/groups/${params.id}/payment-requests`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          from: user?.username,
+          to,
+          amount,
+        }),
+      });
+
+      if (!response.ok) {
+        setRequestedPayments(prev => {
+          const newSet = new Set(prev);
+          newSet.delete(to);
+          return newSet;
+        });
+        throw new Error('Failed to create payment request');
+      }
+      await loadGroupData();
+    } catch (error) {
+      console.error('Error:', error);
+      alert('Failed to create payment request');
+    }
+  };
+
+  const handlePay = async (requestId: string) => {
+    try {
+      // TODO: Implement Lightning Network payment
+      alert('Lightning payment will be implemented here');
+      
+      const response = await fetch(`/api/groups/${params.id}/payment-requests/${requestId}/pay`, {
+        method: 'POST',
+      });
+
+      if (!response.ok) throw new Error('Failed to process payment');
+      await loadGroupData();
+    } catch (error) {
+      console.error('Error:', error);
+      alert('Failed to process payment');
+    }
+  };
+
+  const handleDirectPay = async (amount: number, to: string) => {
+    try {
+      // TODO: Implement Lightning Network payment
+      alert(`Lightning payment of ${amount} sats will be sent to ${to}`);
+      
+      const response = await fetch(`/api/groups/${params.id}/payment-requests`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          from: to,
+          to: user?.username,
+          amount,
+          status: 'paid',
+        }),
+      });
+
+      if (!response.ok) throw new Error('Failed to process payment');
+      await loadGroupData();
+    } catch (error) {
+      console.error('Error:', error);
+      alert('Failed to process payment');
+    }
   };
 
   if (loading) return <div className="text-center py-12">Loading...</div>;
   if (error) return <div className="text-center py-12 text-red-600">{error}</div>;
   if (!group) return <div className="text-center py-12">Group not found</div>;
+  if (!balances.length) return <div className="text-center py-12">Loading balances...</div>;
 
   return (
     <div className="max-w-2xl mx-auto">
@@ -87,6 +231,72 @@ export default function GroupDetails() {
             >
               {member}
             </span>
+          ))}
+        </div>
+      </div>
+
+      <div className="bg-white rounded-lg shadow-md p-6 mb-6">
+        <h3 className="text-xl font-semibold mb-4">Balances</h3>
+        <div className="space-y-4">
+          {balances.map((balance) => (
+            <div
+              key={balance.user}
+              className={`flex justify-between items-center p-3 rounded-lg ${
+                user?.username === balance.user ? 'bg-blue-50 border border-blue-100' : ''
+              }`}
+            >
+              <div>
+                <p className="font-semibold">{balance.user}</p>
+                <p className={`text-sm ${
+                  balance.amount > 0 ? 'text-green-600' : 'text-red-600'
+                }`}>
+                  {balance.amount > 0 ? 'To receive' : 'To pay'}: {Math.abs(balance.amount)} sats
+                </p>
+                {balance.pendingRequests
+                  .filter(req => req.status === 'pending')
+                  .map(request => (
+                    <p key={request._id} className="text-sm text-orange-600">
+                      {request.to === balance.user
+                        ? `Payment request from ${request.from}: ${request.amount} sats`
+                        : request.from === balance.user
+                        ? `Payment requested by ${request.to}: ${request.amount} sats`
+                        : null
+                      }
+                    </p>
+                  ))}
+              </div>
+              <div className="space-x-2">
+                {user?.username !== balance.user && balance.amount < 0 && (
+                  <button
+                    onClick={() => handleRequestPayment(Math.abs(balance.amount), balance.user)}
+                    className="bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700"
+                  >
+                    Request Payment
+                  </button>
+                )}
+                {user?.username === balance.user && balance.amount < 0 && (
+                  balance.pendingRequests
+                    .filter(req => req.to === user.username && req.status === 'pending')
+                    .map(request => (
+                      <button
+                        key={request._id}
+                        onClick={() => handlePay(request._id)}
+                        className="bg-green-600 text-white px-3 py-1 rounded hover:bg-green-700"
+                      >
+                        Pay {request.amount} sats
+                      </button>
+                    ))
+                )}
+                {balance.pendingRequests
+                  .filter(req => req.from === user?.username && req.status === 'pending')
+                  .map(request => (
+                    <span key={request._id} className="text-orange-600 text-sm">
+                      Payment requested
+                    </span>
+                  ))
+                }
+              </div>
+            </div>
           ))}
         </div>
       </div>
